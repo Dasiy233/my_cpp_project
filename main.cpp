@@ -13,22 +13,29 @@
 #include <tuple> 
 #include <cstdlib> 
 #include <fstream> 
+#include <filesystem> // 【新增】用于文件和目录操作
 
 using namespace torch::indexing;
 using namespace open3d;
+namespace fs = std::filesystem; // 【新增】简化命名空间
 
 // =================================================================
-// 2. 路径配置 (绝对路径)
+// 2. 路径配置 (自动管理输出文件夹)
 // =================================================================
-const std::string MODEL_PATH = "D:/work/C++/my_cpp_project/smpl_female_30.pt";
-const std::string SCAN_PATH = "D:/work/C++/my_cpp_project/input.obj";
-const std::string FACES_PATH = "D:/work/C++/my_cpp_project/smpl_faces.txt";
+// 项目根目录
+const std::string BASE_DIR = "D:/work/C++/my_cpp_project/";
 
-// 【关键修改】全部改为 .glb 格式！
-// .glb 格式完美支持颜色，且 Windows 自带 3D 查看器能直接打开
-const std::string OUTPUT_OBJ = "D:/work/C++/my_cpp_project/output_smpl_highres.glb";
-const std::string OUTPUT_COMPARISON = "D:/work/C++/my_cpp_project/result_comparison.glb";
-const std::string OUTPUT_JOINTS_ONLY = "D:/work/C++/my_cpp_project/joints_on_input.glb";
+// 输入文件
+const std::string MODEL_PATH = BASE_DIR + "smpl_female_30.pt";
+const std::string SCAN_PATH = BASE_DIR + "input2.obj";
+const std::string FACES_PATH = BASE_DIR + "smpl_faces.txt";
+
+// 【关键修改】输出文件夹和文件路径
+const std::string OUTPUT_DIR = BASE_DIR + "results/"; // 新建一个 results 文件夹
+
+const std::string OUTPUT_OBJ = OUTPUT_DIR + "output_smpl_highres.glb";
+const std::string OUTPUT_COMPARISON = OUTPUT_DIR + "result_comparison.glb";
+const std::string OUTPUT_JOINTS_ONLY = OUTPUT_DIR + "joints_on_input.glb";
 
 // 3. 参数配置
 const float INIT_ARM_ANGLE = 1.0f;
@@ -54,19 +61,15 @@ bool load_faces(const std::string& path, std::vector<Eigen::Vector3i>& faces) {
     return true;
 }
 
-// 创建关节球体可视化
 std::shared_ptr<geometry::TriangleMesh> create_joints_visual(const torch::Tensor& joints, const Eigen::Vector3d& color) {
     auto combined_mesh = std::make_shared<geometry::TriangleMesh>();
     auto joints_cpu = joints.squeeze(0).cpu();
     auto acc = joints_cpu.accessor<float, 2>();
-
-    // 只取前 24 个主要关节
     for (int i = 0; i < 24; ++i) {
-        // 创建一个小球，半径 0.03 米
         auto sphere = geometry::TriangleMesh::CreateSphere(0.03, 10);
         sphere->Translate(Eigen::Vector3d(acc[i][0], acc[i][1], acc[i][2]));
         sphere->PaintUniformColor(color);
-        *combined_mesh += *sphere; // 合并网格
+        *combined_mesh += *sphere;
     }
     return combined_mesh;
 }
@@ -74,6 +77,18 @@ std::shared_ptr<geometry::TriangleMesh> create_joints_visual(const torch::Tensor
 // ================= 主程序 =================
 int main() {
     system("chcp 65001 > nul");
+
+    // 【新增】自动创建 results 输出文件夹
+    try {
+        if (!fs::exists(OUTPUT_DIR)) {
+            std::cout << ">>> 创建输出文件夹: " << OUTPUT_DIR << std::endl;
+            fs::create_directories(OUTPUT_DIR);
+        }
+    }
+    catch (const std::exception& e) {
+        std::cerr << "❌ 无法创建输出目录: " << e.what() << std::endl;
+        return -1;
+    }
 
     try {
         torch::Device device(torch::kCPU);
@@ -86,22 +101,48 @@ int main() {
         torch::jit::script::Module smpl_module = torch::jit::load(MODEL_PATH);
         smpl_module.to(device);
 
-        // 2. 加载原始扫描数据 (用于最终可视化)
+        // 2. 加载扫描数据
         std::cout << ">>> 正在加载并预处理扫描数据..." << std::endl;
         auto target_mesh_ptr = io::CreateMeshFromFile(SCAN_PATH);
         if (target_mesh_ptr == nullptr || target_mesh_ptr->vertices_.empty()) throw std::runtime_error("读取扫描失败");
 
-        // 预处理 (旋转 + 居中)
-        Eigen::AngleAxisd rot_x(M_PI, Eigen::Vector3d::UnitX());
-        target_mesh_ptr->Rotate(rot_x.toRotationMatrix(), target_mesh_ptr->GetCenter());
-        Eigen::AngleAxisd rot_y(M_PI, Eigen::Vector3d::UnitY());
+        // =========================================================
+        // 【新增】自动单位换算 (毫米 -> 米)
+        // =========================================================
+        auto bbox = target_mesh_ptr->GetAxisAlignedBoundingBox();
+        double height = bbox.GetMaxBound().y() - bbox.GetMinBound().y();
+
+        // 如果身高超过 10 米，那肯定是毫米单位 (1700mm)
+        if (height > 10.0) {
+            std::cout << ">>> ⚠️ 检测到模型单位为毫米 (身高 " << height << ")，正在缩放为米 (x0.001)..." << std::endl;
+            target_mesh_ptr->Scale(0.001, target_mesh_ptr->GetCenter());
+        }
+        // =========================================================
+        // =========================================================
+        // 【关键修复】删除这里的旋转！
+        // 因为 input.obj 已经被 PreprocessMesh.exe 扶正了
+        // 这里再转就又倒了！
+        // =========================================================
+
+        // 预处理 (旋转 + 居中) - 保持你之前的代码不变
+       // Eigen::AngleAxisd rot_x(M_PI, Eigen::Vector3d::UnitX());
+       // target_mesh_ptr->Rotate(rot_x.toRotationMatrix(), target_mesh_ptr->GetCenter());
+        // ... (后面代码不用动)
+       // Eigen::AngleAxisd rot_y(M_PI, Eigen::Vector3d::UnitY());
+       // target_mesh_ptr->Rotate(rot_y.toRotationMatrix(), target_mesh_ptr->GetCenter());
+
+        // 【关键修改】强制转身 180 度！
+        // 解决前后反了的问题
+        // =========================================================
+        std::cout << ">>> 正在执行强制转身 (绕 Y 轴旋转 180 度)..." << std::endl;
+       Eigen::AngleAxisd rot_y(M_PI, Eigen::Vector3d::UnitY());
         target_mesh_ptr->Rotate(rot_y.toRotationMatrix(), target_mesh_ptr->GetCenter());
+
         target_mesh_ptr->Translate(-target_mesh_ptr->GetAxisAlignedBoundingBox().GetCenter());
 
-        // 设置为灰色，准备用于可视化
         target_mesh_ptr->PaintUniformColor(Eigen::Vector3d(0.6, 0.6, 0.6)); // 灰色
 
-        // 3. 降采样用于计算
+        // 3. 降采样
         auto pcd = target_mesh_ptr->SamplePointsUniformly(10000);
         auto vertices_eigen = pcd->points_;
         int num_verts = vertices_eigen.size();
@@ -149,12 +190,12 @@ int main() {
         { torch::NoGradGuard no_grad; global_orient.index_put_({ 0, 1 }, best_angle); }
 
 
-        // ================= 优化循环 (1:1 复刻 Python 参数) =================
+        // ================= 优化循环 =================
         std::vector<torch::Tensor> params = { transl, scale, betas, pose, global_orient };
         torch::optim::Adam optimizer(params, torch::optim::AdamOptions(0.02));
 
         int total_iters = 650;
-        std::cout << "\n>>> 开始优化 (完全对齐 Python 逻辑)..." << std::endl;
+        std::cout << "\n>>> 开始优化 (结果将存入 " << OUTPUT_DIR << ")..." << std::endl;
 
         for (int i = 0; i < total_iters; ++i) {
             optimizer.zero_grad();
@@ -166,7 +207,6 @@ int main() {
             bool lock_detail_betas = false;
 
             if (i < 150) {
-                // Stage 1
                 stage = "Stage 1: 刚性";
                 for (auto& group : optimizer.param_groups()) static_cast<torch::optim::AdamOptions&>(group.options()).lr(0.02);
                 w_pose_reg = 10.0; w_beta_reg = 0.0;
@@ -175,7 +215,6 @@ int main() {
 
             }
             else if (i < 450) {
-                // Stage 2
                 stage = "Stage 2: 体型";
                 for (auto& group : optimizer.param_groups()) static_cast<torch::optim::AdamOptions&>(group.options()).lr(0.05);
                 w_pose_reg = 1.0; w_beta_reg = 0.005;
@@ -183,20 +222,17 @@ int main() {
 
             }
             else {
-                // Stage 3
                 stage = "Stage 3: 微调";
                 for (auto& group : optimizer.param_groups()) static_cast<torch::optim::AdamOptions&>(group.options()).lr(0.005);
                 w_pose_reg = 0.1; w_beta_reg = 0.0;
                 lock_body_pose = false; lock_detail_betas = false;
             }
 
-            // 前向传播
             std::vector<torch::jit::IValue> in;
             in.push_back(betas); in.push_back(pose); in.push_back(global_orient); in.push_back(transl); in.push_back(scale);
             auto out = smpl_module.forward(in).toTuple();
             auto smpl_verts = out->elements()[0].toTensor();
 
-            // Loss 计算
             auto loss_dist = simple_chamfer_distance(smpl_verts, target_verts);
             auto loss_reg_pose = torch::mean(torch::pow(pose, 2)) * w_pose_reg;
             auto loss_reg_beta = torch::mean(torch::pow(betas, 2)) * w_beta_reg;
@@ -204,7 +240,6 @@ int main() {
 
             total_loss.backward();
 
-            // 梯度锁
             if (lock_body_pose) pose.grad().index({ Slice(), Slice(3, torch::indexing::None) }).fill_(0.0);
             if (lock_detail_betas) betas.grad().index({ Slice(), Slice(10, torch::indexing::None) }).fill_(0.0);
 
@@ -214,45 +249,41 @@ int main() {
         }
 
         // ================= 保存与可视化 =================
-        std::cout << "\n>>> 优化完成，正在生成可视化结果..." << std::endl;
+        std::cout << "\n>>> 优化完成，正在保存文件到 " << OUTPUT_DIR << " ..." << std::endl;
         torch::NoGradGuard no_grad;
 
-        // 1. 获取最终的顶点和关节
         std::vector<torch::jit::IValue> in;
         in.push_back(betas); in.push_back(pose); in.push_back(global_orient); in.push_back(transl); in.push_back(scale);
         auto outputs = smpl_module.forward(in).toTuple();
-        // elements()[0] 是 vertices, elements()[1] 是 joints
         auto final_verts = outputs->elements()[0].toTensor().squeeze(0).cpu();
-        auto final_joints = outputs->elements()[1].toTensor(); // 保持在 GPU 上传给辅助函数
+        auto final_joints = outputs->elements()[1].toTensor();
 
-        // 2. 创建 SMPL Mesh (红色)
+        // 1. SMPL
         auto smpl_mesh_ptr = std::make_shared<geometry::TriangleMesh>();
         auto v_acc = final_verts.accessor<float, 2>();
         for (int k = 0; k < final_verts.size(0); ++k) smpl_mesh_ptr->vertices_.push_back(Eigen::Vector3d(v_acc[k][0], v_acc[k][1], v_acc[k][2]));
         if (load_faces(FACES_PATH, smpl_mesh_ptr->triangles_)) {
             smpl_mesh_ptr->ComputeVertexNormals();
-            // 保存高精度模型
-            // auto high_res_mesh = smpl_mesh_ptr->SubdivideLoop(1); // 可选细分
             io::WriteTriangleMesh(OUTPUT_OBJ, *smpl_mesh_ptr);
         }
-        smpl_mesh_ptr->PaintUniformColor(Eigen::Vector3d(1.0, 0.0, 0.0)); // 红色，半透明效果需要在Shader里做，这里先设为纯红
+        smpl_mesh_ptr->PaintUniformColor(Eigen::Vector3d(1.0, 0.0, 0.0));
 
-        // 3. 创建关节球体可视化 (绿色)
+        // 2. Joints
         auto joints_mesh_ptr = create_joints_visual(final_joints, Eigen::Vector3d(0.0, 1.0, 0.0));
 
-        // 4. 生成对比文件 (红+灰)
+        // 3. Comparison
         auto comparison_mesh = std::make_shared<geometry::TriangleMesh>();
-        *comparison_mesh += *target_mesh_ptr; // 灰
-        *comparison_mesh += *smpl_mesh_ptr;   // 红
+        *comparison_mesh += *target_mesh_ptr;
+        *comparison_mesh += *smpl_mesh_ptr;
         io::WriteTriangleMesh(OUTPUT_COMPARISON, *comparison_mesh);
-        std::cout << "✅ 对比模型已保存: " << OUTPUT_COMPARISON << std::endl;
 
-        // 5. 生成骨骼检查文件 (灰+绿)
+        // 4. Joints Only
         auto joints_check_mesh = std::make_shared<geometry::TriangleMesh>();
-        *joints_check_mesh += *target_mesh_ptr; // 灰
-        *joints_check_mesh += *joints_mesh_ptr; // 绿
+        *joints_check_mesh += *target_mesh_ptr;
+        *joints_check_mesh += *joints_mesh_ptr;
         io::WriteTriangleMesh(OUTPUT_JOINTS_ONLY, *joints_check_mesh);
-        std::cout << "✅ 骨骼检查模型已保存: " << OUTPUT_JOINTS_ONLY << std::endl;
+
+        std::cout << "✅ 全部文件已保存至: " << OUTPUT_DIR << std::endl;
 
     }
     catch (const std::exception& e) {

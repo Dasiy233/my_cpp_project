@@ -17,6 +17,20 @@ find_package(Open3D REQUIRED)
 add_executable(smpl_fitting main.cpp)
 target_link_libraries(smpl_fitting ${TORCH_LIBRARIES} Open3D::Open3D)
 
+# =========================================================
+# 新增：预处理工具 (只依赖 Open3D，不需要 LibTorch)
+# =========================================================
+add_executable(preprocess_mesh PreprocessMesh.cpp)
+target_link_libraries(preprocess_mesh Open3D::Open3D)
+
+# 如果是 Windows，可能需要把 Open3D.dll 复制过去 (和主程序一样)
+if (MSVC)
+    add_custom_command(TARGET preprocess_mesh POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+        "$<TARGET_FILE:Open3D::Open3D>" "$<TARGET_FILE_DIR:preprocess_mesh>"
+    )
+endif()
+
 if (MSVC)
     add_custom_command(TARGET smpl_fitting POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TORCH_INSTALL_PREFIX}/lib/torch.dll" "$<TARGET_FILE_DIR:smpl_fitting>"
