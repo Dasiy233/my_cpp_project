@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <string>
 #include <memory>
+#include <numeric> // 【新增】用于 std::accumulate
 
 #include <Eigen/Dense>
 #include <open3d/Open3D.h>
@@ -36,20 +37,6 @@ double PointToSegmentDistance(const Eigen::Vector2d& p, const Eigen::Vector2d& a
     double t = std::max(0.0, std::min(1.0, ap.dot(ab) / l2));
     Eigen::Vector2d projection = a + t * ab;
     return (p - projection).norm();
-}
-
-std::pair<double, double> FitLine2D(const std::vector<Eigen::Vector2d>& points) {
-    if (points.size() < 2) return { 0.0, 0.0 };
-    int n = static_cast<int>(points.size());
-    Eigen::MatrixXd A(n, 2);
-    Eigen::VectorXd B(n);
-    for (int i = 0; i < n; ++i) {
-        A(i, 0) = points[i].x();
-        A(i, 1) = 1.0;
-        B(i) = points[i].y();
-    }
-    Eigen::Vector2d coeffs = A.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(B);
-    return { coeffs[0], coeffs[1] };
 }
 
 double CalculateConvexHullPerimeter(const std::vector<Eigen::Vector3d>& slice_points) {
@@ -93,17 +80,16 @@ std::vector<Eigen::Vector3d> GetSlice(double y_height, double tolerance, const g
 }
 
 // =========================================================
-// 3. 核心处理逻辑
+// 3. 核心处理逻辑 (方向修正)
 // =========================================================
 
-// 【新增功能】最后检查是否倒立，如果倒立则翻转
+// 【功能1】检查倒立
 void CheckAndFlipHuman(std::shared_ptr<geometry::TriangleMesh>& mesh) {
     auto bbox = mesh->GetAxisAlignedBoundingBox();
     double min_y = bbox.GetMinBound().y();
     double max_y = bbox.GetMaxBound().y();
     double height = max_y - min_y;
 
-    // 逻辑：将身体分成 10 段，找出最宽的那一段（bounding box width）
     double max_width = -1.0;
     double y_of_max_width = min_y;
 
@@ -113,7 +99,6 @@ void CheckAndFlipHuman(std::shared_ptr<geometry::TriangleMesh>& mesh) {
         auto slice = GetSlice(y_center, height / steps, *mesh);
         if (slice.empty()) continue;
 
-        // 计算这一层的 X 轴宽度
         double min_x = 1e9, max_x = -1e9;
         for (const auto& v : slice) {
             min_x = std::min(min_x, v.x());
@@ -126,25 +111,73 @@ void CheckAndFlipHuman(std::shared_ptr<geometry::TriangleMesh>& mesh) {
         }
     }
 
-    // 判断：人体的最宽处（肩膀/手臂）通常在上半身 (> 0.5 高度)
-    // 如果最宽处跑到了下半身 (< 0.4 高度)，说明可能倒立了
     double relative_pos = (y_of_max_width - min_y) / height;
-    std::cout << ">>> 人体形态检查: 最宽处位于高度比例 " << relative_pos * 100.0 << "% 处。" << std::endl;
+    std::cout << ">>> [倒立检查] 最宽处高度比例: " << relative_pos * 100.0 << "%" << std::endl;
 
     if (relative_pos < 0.4) {
-        std::cout << ">>> ⚠️ 检测到人体倒立 (最宽处在下半身)！正在自动翻转..." << std::endl;
-
-        // 绕 X 轴旋转 180 度
+        std::cout << ">>> ⚠️ 检测到人体倒立！正在翻转..." << std::endl;
         Eigen::AngleAxisd rot_x(M_PI, Eigen::Vector3d::UnitX());
         mesh->Rotate(rot_x.toRotationMatrix(), mesh->GetCenter());
 
-        // 重新落地
         auto new_bbox = mesh->GetAxisAlignedBoundingBox();
         mesh->Translate(Eigen::Vector3d(0, -new_bbox.GetMinBound().y(), 0));
         std::cout << "✅ 已修正倒立问题。" << std::endl;
     }
     else {
-        std::cout << "✅ 人体方向正确。" << std::endl;
+        std::cout << "✅ 上下方向正确。" << std::endl;
+    }
+}
+
+// 【功能2】检查前后 (脚尖法)
+void AutoCorrectFrontBack(std::shared_ptr<geometry::TriangleMesh>& mesh) {
+    auto bbox = mesh->GetAxisAlignedBoundingBox();
+    double min_y = bbox.GetMinBound().y();
+    double height = bbox.GetExtent().y();
+
+    // 1. 取小腿区域 (作为中心参考)
+    double shin_y = min_y + height * 0.20;
+    auto shin_slice = GetSlice(shin_y, height * 0.05, *mesh);
+
+    if (shin_slice.empty()) return;
+
+    double shin_z_center = 0.0;
+    for (const auto& p : shin_slice) shin_z_center += p.z();
+    shin_z_center /= static_cast<double>(shin_slice.size());
+
+    // 2. 取脚底区域
+    double foot_y = min_y + height * 0.05;
+    auto foot_slice = GetSlice(foot_y, height * 0.05, *mesh);
+
+    if (foot_slice.empty()) return;
+
+    double max_z = -1e9; // 假设是脚尖
+    double min_z = 1e9;  // 假设是脚跟
+    for (const auto& p : foot_slice) {
+        max_z = std::max(max_z, p.z());
+        min_z = std::min(min_z, p.z());
+    }
+
+    // 3. 对比延伸量
+    double forward_ext = std::abs(max_z - shin_z_center); // 向前伸的距离
+    double backward_ext = std::abs(shin_z_center - min_z); // 向后伸的距离
+
+    std::cout << ">>> [前后检查] 前伸: " << forward_ext << " vs 后伸: " << backward_ext << std::endl;
+
+    // 正常人脚尖(前)比脚跟(后)长
+    // 如果后伸比前伸还长，说明反了
+    if (backward_ext > forward_ext * 1.1) {
+        std::cout << ">>> ⚠️ 检测到前后反向！正在转身 180 度..." << std::endl;
+        Eigen::AngleAxisd rot_y(M_PI, Eigen::Vector3d::UnitY());
+        mesh->Rotate(rot_y.toRotationMatrix(), mesh->GetCenter());
+
+        // 旋转后重新居中
+        mesh->Translate(-mesh->GetAxisAlignedBoundingBox().GetCenter());
+        auto bb = mesh->GetAxisAlignedBoundingBox();
+        mesh->Translate(Eigen::Vector3d(0, -bb.GetMinBound().y(), 0));
+        std::cout << "✅ 已修正前后方向。" << std::endl;
+    }
+    else {
+        std::cout << "✅ 前后方向正确。" << std::endl;
     }
 }
 
@@ -160,8 +193,8 @@ void FixOrientationAndNormalize(std::shared_ptr<geometry::TriangleMesh>& mesh) {
 
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigen_solver1(covariance1);
     Eigen::Matrix3d pca1_principal_axes = eigen_solver1.eigenvectors();
-    Eigen::Vector3d pca1_height_axis = pca1_principal_axes.col(2); // Z轴
-    Eigen::Vector3d pca1_width_axis = pca1_principal_axes.col(1);
+    Eigen::Vector3d pca1_height_axis = pca1_principal_axes.col(2); // Z轴(假设为高)
+    Eigen::Vector3d pca1_width_axis = pca1_principal_axes.col(1);  // Y轴
 
     // 2. 地面检测
     auto analyze_end = [&](const geometry::TriangleMesh& m, const Eigen::Vector3d& h_axis, bool is_max_end) -> std::vector<size_t> {
@@ -193,7 +226,6 @@ void FixOrientationAndNormalize(std::shared_ptr<geometry::TriangleMesh>& mesh) {
 
         std::cout << "  - 检测到地面 (" << (is_max_end ? "顶端" : "底端") << ")，正在移除..." << std::endl;
 
-        // 拟合平面
         Eigen::Vector3d plane_centroid = Eigen::Vector3d::Zero();
         for (const auto& pt : seed_points) plane_centroid += pt;
         plane_centroid /= static_cast<double>(seed_points.size());
@@ -249,46 +281,7 @@ void FixOrientationAndNormalize(std::shared_ptr<geometry::TriangleMesh>& mesh) {
         final_depth_axis = pca1_principal_axes.col(0);
     }
 
-    // 3. 确定 Z 轴
-    auto temp_mesh = std::make_shared<geometry::TriangleMesh>(*mesh);
-    Eigen::Matrix3d R_temp;
-    R_temp.col(1) = final_height_axis.normalized();
-    R_temp.col(2) = final_depth_axis.normalized();
-    R_temp.col(0) = -R_temp.col(1).cross(R_temp.col(2)).normalized();
-    temp_mesh->Transform(Eigen::Affine3d(R_temp.transpose()).matrix());
-
-    auto bbox = temp_mesh->GetAxisAlignedBoundingBox();
-    double min_y = bbox.GetMinBound().y(), h = bbox.GetExtent().y();
-    std::vector<Eigen::Vector3d> l_prof, r_prof;
-    for (double y = min_y + h * 0.80; y < min_y + h * 0.96; y += 5.0) {
-        auto slice = GetSlice(y, 4.0, *temp_mesh);
-        if (slice.size() < 2) continue;
-        auto x_bounds = std::minmax_element(slice.begin(), slice.end(), [](const auto& a, const auto& b) { return a.x() < b.x(); });
-        l_prof.push_back(*x_bounds.first); r_prof.push_back(*x_bounds.second);
-    }
-
-    if (l_prof.size() > 1 && r_prof.size() > 1) {
-        double neck_base_y = (l_prof.front().y() + r_prof.front().y()) / 2.0;
-        std::vector<Eigen::Vector2d> f_prof_2d, b_prof_2d;
-        for (double y = neck_base_y; y < neck_base_y + 30.0; y += 3.0) {
-            auto slice = GetSlice(y, 3.0, *temp_mesh);
-            if (slice.size() < 2) continue;
-            auto z_bounds = std::minmax_element(slice.begin(), slice.end(), [](const auto& a, const auto& b) { return a.z() < b.z(); });
-            b_prof_2d.emplace_back(z_bounds.first->y(), z_bounds.first->z());
-            f_prof_2d.emplace_back(z_bounds.second->y(), z_bounds.second->z());
-        }
-        if (f_prof_2d.size() > 2 && b_prof_2d.size() > 2) {
-            auto fit_res_f = FitLine2D(f_prof_2d);
-            auto fit_res_b = FitLine2D(b_prof_2d);
-            double avg_slope = (fit_res_f.first + fit_res_b.first) / 2.0;
-            if (avg_slope < -0.1) {
-                std::cout << "  - Z轴反向修正 (胸部朝前)。" << std::endl;
-                final_depth_axis = -final_depth_axis;
-            }
-        }
-    }
-
-    // 4. 应用变换
+    // 4. 应用初始变换 (PCA 对齐)
     Eigen::Vector3d final_Y = final_height_axis.normalized();
     Eigen::Vector3d final_Z = final_depth_axis.normalized();
     Eigen::Vector3d final_X = -final_Y.cross(final_Z).normalized();
@@ -299,10 +292,17 @@ void FixOrientationAndNormalize(std::shared_ptr<geometry::TriangleMesh>& mesh) {
     T.pretranslate(-mesh->GetCenter());
     mesh->Transform(T.matrix());
 
-    // 5. 【关键】最后一步：检查形态学，如果倒立则翻转
+    // =========================================================
+    // 【核心修正】按顺序执行智能校正
+    // =========================================================
+
+    // 5. 先检查是否倒立，如果倒立则翻转 (你原来的代码逻辑)
     CheckAndFlipHuman(mesh);
 
-    // 6. 最终落地
+    // 6. 再检查前后方向 (新增逻辑)
+    AutoCorrectFrontBack(mesh);
+
+    // 7. 最终落地
     auto final_bbox = mesh->GetAxisAlignedBoundingBox();
     mesh->Translate(Eigen::Vector3d(0, -final_bbox.GetMinBound().y(), 0));
     std::cout << ">>> 预处理完成，模型已归一化。" << std::endl;
@@ -317,14 +317,13 @@ int main() {
 
     // 【请修改路径】
     std::string input_path = "D:/work/C++/my_cpp_project/Fusion_C_308.stl";
-    std::string output_path = "D:/work/C++/my_cpp_project/input2.obj";
+    std::string output_path = "D:/work/C++/my_cpp_project/input2.obj"; // main.cpp 读取这个
 
     std::cout << "正在读取: " << input_path << std::endl;
 
     auto mesh = std::make_shared<geometry::TriangleMesh>();
     if (!io::ReadTriangleMesh(input_path, *mesh)) {
         std::cerr << "错误: 无法读取文件 " << input_path << std::endl;
-        std::cerr << "请检查路径是否正确！" << std::endl;
         return -1;
     }
 
@@ -338,7 +337,7 @@ int main() {
 
     std::cout << "正在保存结果到: " << output_path << std::endl;
     if (io::WriteTriangleMesh(output_path, *mesh)) {
-        std::cout << "✅ 成功生成 input.obj" << std::endl;
+        std::cout << "✅ 成功生成 input2.obj" << std::endl;
     }
     else {
         std::cerr << "❌ 保存失败！" << std::endl;

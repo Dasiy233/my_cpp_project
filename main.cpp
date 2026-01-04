@@ -13,26 +13,34 @@
 #include <tuple> 
 #include <cstdlib> 
 #include <fstream> 
-#include <filesystem> // 【新增】用于文件和目录操作
+#include <filesystem> 
 
 using namespace torch::indexing;
 using namespace open3d;
-namespace fs = std::filesystem; // 【新增】简化命名空间
+namespace fs = std::filesystem;
 
 // =================================================================
-// 2. 路径配置 (自动管理输出文件夹)
+// 【🔥 核心修改区 🔥】 方向反了？改这里！
 // =================================================================
-// 项目根目录
+// 0.0f   = 不旋转 (默认)
+// 3.14f  = 旋转180度 (转身)
+// 1.57f  = 旋转90度 (向左)
+// -1.57f = 旋转-90度 (向右)
+// 既然您说现在是反的，我们强制设为 3.14 (180度)
+const float FORCE_ROTATION_ANGLE = 0.0f;
+
+// =================================================================
+// 2. 路径配置
+// =================================================================
 const std::string BASE_DIR = "D:/work/C++/my_cpp_project/";
 
-// 输入文件
+// 输入文件 (读取预处理好的 input2.obj)
 const std::string MODEL_PATH = BASE_DIR + "smpl_female_30.pt";
 const std::string SCAN_PATH = BASE_DIR + "input2.obj";
 const std::string FACES_PATH = BASE_DIR + "smpl_faces.txt";
 
-// 【关键修改】输出文件夹和文件路径
-const std::string OUTPUT_DIR = BASE_DIR + "results/"; // 新建一个 results 文件夹
-
+// 输出路径
+const std::string OUTPUT_DIR = BASE_DIR + "results/";
 const std::string OUTPUT_OBJ = OUTPUT_DIR + "output_smpl_highres.glb";
 const std::string OUTPUT_COMPARISON = OUTPUT_DIR + "result_comparison.glb";
 const std::string OUTPUT_JOINTS_ONLY = OUTPUT_DIR + "joints_on_input.glb";
@@ -78,7 +86,7 @@ std::shared_ptr<geometry::TriangleMesh> create_joints_visual(const torch::Tensor
 int main() {
     system("chcp 65001 > nul");
 
-    // 【新增】自动创建 results 输出文件夹
+    // 创建输出目录
     try {
         if (!fs::exists(OUTPUT_DIR)) {
             std::cout << ">>> 创建输出文件夹: " << OUTPUT_DIR << std::endl;
@@ -102,45 +110,22 @@ int main() {
         smpl_module.to(device);
 
         // 2. 加载扫描数据
-        std::cout << ">>> 正在加载并预处理扫描数据..." << std::endl;
+        std::cout << ">>> 正在加载扫描数据: " << SCAN_PATH << std::endl;
         auto target_mesh_ptr = io::CreateMeshFromFile(SCAN_PATH);
         if (target_mesh_ptr == nullptr || target_mesh_ptr->vertices_.empty()) throw std::runtime_error("读取扫描失败");
 
-        // =========================================================
-        // 【新增】自动单位换算 (毫米 -> 米)
-        // =========================================================
+        // --- 预处理 ---
+        // 单位换算 (双重保险)
         auto bbox = target_mesh_ptr->GetAxisAlignedBoundingBox();
         double height = bbox.GetMaxBound().y() - bbox.GetMinBound().y();
-
-        // 如果身高超过 10 米，那肯定是毫米单位 (1700mm)
         if (height > 10.0) {
-            std::cout << ">>> ⚠️ 检测到模型单位为毫米 (身高 " << height << ")，正在缩放为米 (x0.001)..." << std::endl;
+            std::cout << ">>> ⚠️ 检测到毫米单位，缩放 x0.001" << std::endl;
             target_mesh_ptr->Scale(0.001, target_mesh_ptr->GetCenter());
         }
-        // =========================================================
-        // =========================================================
-        // 【关键修复】删除这里的旋转！
-        // 因为 input.obj 已经被 PreprocessMesh.exe 扶正了
-        // 这里再转就又倒了！
-        // =========================================================
 
-        // 预处理 (旋转 + 居中) - 保持你之前的代码不变
-       // Eigen::AngleAxisd rot_x(M_PI, Eigen::Vector3d::UnitX());
-       // target_mesh_ptr->Rotate(rot_x.toRotationMatrix(), target_mesh_ptr->GetCenter());
-        // ... (后面代码不用动)
-       // Eigen::AngleAxisd rot_y(M_PI, Eigen::Vector3d::UnitY());
-       // target_mesh_ptr->Rotate(rot_y.toRotationMatrix(), target_mesh_ptr->GetCenter());
-
-        // 【关键修改】强制转身 180 度！
-        // 解决前后反了的问题
-        // =========================================================
-        std::cout << ">>> 正在执行强制转身 (绕 Y 轴旋转 180 度)..." << std::endl;
-       Eigen::AngleAxisd rot_y(M_PI, Eigen::Vector3d::UnitY());
-        target_mesh_ptr->Rotate(rot_y.toRotationMatrix(), target_mesh_ptr->GetCenter());
-
+        // 居中 (必须做)
         target_mesh_ptr->Translate(-target_mesh_ptr->GetAxisAlignedBoundingBox().GetCenter());
-
-        target_mesh_ptr->PaintUniformColor(Eigen::Vector3d(0.6, 0.6, 0.6)); // 灰色
+        target_mesh_ptr->PaintUniformColor(Eigen::Vector3d(0.6, 0.6, 0.6));
 
         // 3. 降采样
         auto pcd = target_mesh_ptr->SamplePointsUniformly(10000);
@@ -171,24 +156,14 @@ int main() {
             pose.index_put_({ 0, 50 }, std::abs(INIT_ARM_ANGLE));
         }
 
-        // 自动朝向搜索
-        std::cout << ">>> 搜索最佳水平朝向..." << std::endl;
-        float best_loss = 1e9;
-        float best_angle = 0.0f;
-        std::vector<float> angles = { 0.0f, (float)M_PI / 2, (float)M_PI, -(float)M_PI / 2 };
-        for (float ang : angles) {
+        // =============================================================
+        // 【强制设定角度】不猜了，直接由你决定！
+        // =============================================================
+        std::cout << ">>> [手动模式] 强制设定初始朝向: " << int(FORCE_ROTATION_ANGLE * 180 / M_PI) << " 度" << std::endl;
+        {
             torch::NoGradGuard no_grad;
-            auto temp_orient = global_orient.clone();
-            temp_orient.index_put_({ 0, 1 }, ang);
-            std::vector<torch::jit::IValue> in;
-            in.push_back(betas); in.push_back(pose); in.push_back(temp_orient); in.push_back(transl); in.push_back(scale);
-            auto v = smpl_module.forward(in).toTuple()->elements()[0].toTensor();
-            float l = simple_chamfer_distance(v, target_verts).item<float>();
-            if (l < best_loss) { best_loss = l; best_angle = ang; }
+            global_orient.index_put_({ 0, 1 }, FORCE_ROTATION_ANGLE);
         }
-        std::cout << "✅ 最佳角度: " << int(best_angle * 180 / M_PI) << " 度" << std::endl;
-        { torch::NoGradGuard no_grad; global_orient.index_put_({ 0, 1 }, best_angle); }
-
 
         // ================= 优化循环 =================
         std::vector<torch::Tensor> params = { transl, scale, betas, pose, global_orient };
@@ -215,9 +190,12 @@ int main() {
 
             }
             else if (i < 450) {
-                stage = "Stage 2: 体型";
+                stage = "Stage 2: 体型 (抗短裤)";
                 for (auto& group : optimizer.param_groups()) static_cast<torch::optim::AdamOptions&>(group.options()).lr(0.05);
-                w_pose_reg = 1.0; w_beta_reg = 0.005;
+
+                w_pose_reg = 1.0;
+                w_beta_reg = 0.05; // 针对短裤的高约束，防止大腿虚胖
+
                 lock_body_pose = false; lock_detail_betas = false;
 
             }
