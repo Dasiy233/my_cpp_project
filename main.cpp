@@ -39,16 +39,16 @@ namespace fs = std::filesystem;
 // ============================================================================
 // 【配置区域】
 // ============================================================================
-const bool FIX_UPSIDE_DOWN = true;
-const bool FIX_FRONT_BACK = true;
+const bool FIX_UPSIDE_DOWN = false;
+const bool FIX_FRONT_BACK = false;
 const float FORCE_ROTATION_ANGLE = 0.0f;
 
 const std::string BASE_DIR = "D:/work/C++/my_cpp_project/";
-const std::string MODEL_PATH = BASE_DIR + "smpl_female_30.pt";
-const std::string SCAN_PATH = BASE_DIR + "input.obj";
+const std::string MODEL_PATH = BASE_DIR + "smpl_male_30.pt";
+const std::string SCAN_PATH = BASE_DIR + "input2.obj";
 const std::string FACES_PATH = BASE_DIR + "smpl_faces.txt";
 
-const std::string OUTPUT_DIR = BASE_DIR + "results/";
+const std::string OUTPUT_DIR = BASE_DIR + "results2/";
 const std::string OUTPUT_OBJ = OUTPUT_DIR + "output_smpl_highres.glb";
 const std::string OUTPUT_COMPARISON = OUTPUT_DIR + "result_comparison.glb";
 const std::string OUTPUT_JOINTS_ONLY = OUTPUT_DIR + "joints_on_input.glb";
@@ -58,7 +58,9 @@ const std::string OUTPUT_MERGED = OUTPUT_DIR + "model_with_lines.glb";
 const float INIT_Y_OFFSET = 0.05f;
 const int   NUM_BETAS = 30;
 const int   TOTAL_ITERS = 650;
-const float INIT_ARM_ANGLE = 1.0f;
+const float INIT_ARM_ANGLE = 0.8f;//标准 A-Pose	最常见的扫描姿势，手臂自然张开	
+//0.6f ~ 0.9f	35° ~ 50°
+//窄 A - Pose(当前设置)	手臂比较垂，稍微离开身体	1.0f
 
 // ============================================================================
 // 【辅助函数】(优化循环依赖这些函数)
@@ -101,18 +103,43 @@ bool load_faces(const std::string& path, std::vector<Eigen::Vector3i>& faces) {
 }
 
 // 关节可视化 (修复 Accessor 报错)
-std::shared_ptr<geometry::TriangleMesh> create_joints_visual(const torch::Tensor& joints, const Eigen::Vector3d& color) {
+// ===== SMPL 24 joints 名字 & 颜色（0~1）=====
+static const char* JOINT_NAMES[24] = {
+    "pelvis","l_hip","r_hip","spine1","l_knee","r_knee","spine2","l_ankle","r_ankle","spine3",
+    "l_foot","r_foot","neck","l_collar","r_collar","head","l_shoulder","r_shoulder","l_elbow","r_elbow",
+    "l_wrist","r_wrist","l_hand","r_hand"
+};
+
+// 24个高区分度颜色（你也可以自己换）
+static const Eigen::Vector3d JOINT_COLORS[24] = {
+    {1.00,0.00,0.00},{0.00,1.00,0.00},{0.00,0.00,1.00},{1.00,1.00,0.00},
+    {1.00,0.00,1.00},{0.00,1.00,1.00},{1.00,0.50,0.00},{0.50,0.00,1.00},
+    {0.00,0.50,1.00},{0.00,0.80,0.20},{0.80,0.20,0.00},{0.20,0.20,0.20},
+    {0.60,0.60,0.00},{0.60,0.00,0.60},{0.00,0.60,0.60},{0.90,0.30,0.40},
+    {0.40,0.90,0.30},{0.30,0.40,0.90},{0.90,0.70,0.20},{0.20,0.90,0.70},
+    {0.70,0.20,0.90},{0.90,0.20,0.70},{0.20,0.70,0.90},{0.70,0.90,0.20},
+};
+
+// ===== 关节可视化：每个 joint 不同颜色 + 控制台打印对照表 =====
+std::shared_ptr<geometry::TriangleMesh> create_joints_visual(const torch::Tensor& joints, double sphere_r = 0.018) {
     auto mesh = std::make_shared<geometry::TriangleMesh>();
-    torch::Tensor tmp = joints.squeeze(0).cpu(); // 必须先存变量
+    torch::Tensor tmp = joints.squeeze(0).cpu();
     auto acc = tmp.accessor<float, 2>();
+
+    std::cout << "\n[SMPL 24 joints legend]\n";
     for (int i = 0; i < 24; ++i) {
-        auto s = geometry::TriangleMesh::CreateSphere(0.03, 10);
+        auto s = geometry::TriangleMesh::CreateSphere(sphere_r, 10);
         s->Translate(Eigen::Vector3d(acc[i][0], acc[i][1], acc[i][2]));
-        s->PaintUniformColor(color);
+        s->PaintUniformColor(JOINT_COLORS[i]);  // 每个关节不同颜色
         *mesh += *s;
+
+        const auto& c = JOINT_COLORS[i];
+        std::cout << i << "  " << JOINT_NAMES[i]
+            << "  color=(" << c.x() << "," << c.y() << "," << c.z() << ")\n";
     }
     return mesh;
 }
+
 
 // ============================================================================
 // 【核心几何算法：切片、清洗、凸包】
@@ -160,6 +187,14 @@ static std::vector<Eigen::Vector3d> GetTorsoSlice(
     for (int label : labels) if (label != -1) counts[label]++;
 
     if (debug) std::cout << "\n[DEBUG] DBSCAN Clusters: " << counts.size() << " (eps=" << eps << ")" << std::endl;
+    if (debug) {
+        std::vector<std::pair<int, int>> items(counts.begin(), counts.end());
+        std::sort(items.begin(), items.end(),
+            [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (auto& it : items) {
+            std::cout << "  - label " << it.first << " : " << it.second << " pts" << std::endl;
+        }
+    }
 
     if (counts.size() > 1) {
         if (debug) std::cout << "  -> 聚类成功分离，取最大簇。" << std::endl;
@@ -353,12 +388,44 @@ static std::shared_ptr<geometry::TriangleMesh> VisualizePath(const std::vector<E
     return VisualizePathTube(p, c);
 }
 
+static double DistPointSegment(const Eigen::Vector3d& p,
+    const Eigen::Vector3d& a,
+    const Eigen::Vector3d& b) {
+    Eigen::Vector3d ab = b - a;
+    double t = (p - a).dot(ab) / (ab.dot(ab) + 1e-12);
+    t = std::max(0.0, std::min(1.0, t));
+    Eigen::Vector3d proj = a + t * ab;
+    return (p - proj).norm();
+}
+
+static std::vector<Eigen::Vector3d> RemoveArmsByJoints(
+    const std::vector<Eigen::Vector3d>& pts,
+    const std::vector<Eigen::Vector3d>& J,
+    double r = 0.06   // 6cm，通常 0.05~0.08 之间调
+) {
+    const int LS = 16, LE = 18, LW = 20;
+    const int RS = 17, RE = 19, RW = 21;
+
+    std::vector<Eigen::Vector3d> out;
+    out.reserve(pts.size());
+    for (auto& p : pts) {
+        double dl = std::min(DistPointSegment(p, J[LS], J[LE]), DistPointSegment(p, J[LE], J[LW]));
+        double dr = std::min(DistPointSegment(p, J[RS], J[RE]), DistPointSegment(p, J[RE], J[RW]));
+        if (dl > r && dr > r) out.push_back(p);
+    }
+    return out;
+}
+
+
 
 // ============================================================================
 // 【测量主逻辑】 v27.20 智能测量
 // ============================================================================
 void measure_14_items(std::shared_ptr<geometry::TriangleMesh>& mesh, const torch::Tensor& joints_tensor) {
-    
+    const double VIS_TOL_Y = 0.01;      // Y切片可视化厚度
+    const double VIS_TOL_X = 0.03;      // X切片可视化厚度（袖笼）
+    const double VIS_SPHERE_R = 0.0008; // 点球半径
+
     torch::Tensor tmp = joints_tensor.squeeze(0).cpu();
     auto joints_acc = tmp.accessor<float, 2>();
     std::vector<Eigen::Vector3d> J(24);
@@ -369,32 +436,64 @@ void measure_14_items(std::shared_ptr<geometry::TriangleMesh>& mesh, const torch
     double height = bbox.GetMaxBound().y() - min_y;
     auto all_visuals = std::make_shared<geometry::TriangleMesh>();
 
+
+
     std::cout << "\n================ [ 14项专业身体测量报告 ] ================" << std::endl;
     std::cout << "身高            : " << height * 100.0 << " cm" << std::endl;
+
+
 
     // 1) 颈围
     double neck_y = J[12].y() + 0.05;
     auto neck_raw = GetSlice(*mesh, neck_y, 0.015);
     auto neck_clean = GetTorsoSlice(neck_raw, 0.02, 5, 0.50);
-    if (!neck_clean.empty()) *all_visuals += *VisualizeSlicePoints(neck_clean, { 1,1,0 });
+    // 可视化：只画原始切片点云（不再用clean，避免点太少）
+    if (!neck_raw.empty()) *all_visuals += *VisualizeSlicePoints(neck_raw, { 1,1,0 }, VIS_SPHERE_R);
     auto neck_hull = GetConvexHullPointsXZ(neck_clean);
     auto neck_ring = ResampleClosedRing(neck_hull, 120);
     std::cout << "1)  颈围        : " << PerimeterClosed(neck_ring) * 100.0 << " cm" << std::endl;
 
-    // 2) 胸围
+
+    // 2) 胸围（不做手臂剔除：DBSCAN 出 3 簇，取最大簇=躯干）
     double chest_y = J[6].y() * 0.15 + J[9].y() * 0.85;
+    // 测量用厚切片（tol=0.02 固定）
     auto chest_raw = GetSlice(*mesh, chest_y, 0.02);
-    auto chest_clean = GetTorsoSlice(chest_raw, 10.0, 10, 0.70, true);
-    if (!chest_clean.empty()) *all_visuals += *VisualizeSlicePoints(chest_clean, { 0,1,0 });
+
+    // 固定你刚验证成功的参数：eps=0.008, minPts=20
+    auto chest_clean = GetTorsoSlice(chest_raw, 0.008, 20, 0.70, TRUE);
+
+    // 可视化：只画躯干簇（不显示手臂）
+// 可视化：直接画测量得到的躯干簇（稳定、不会被薄切片打碎）
+    if (!chest_clean.empty())
+        *all_visuals += *VisualizeSlicePoints(chest_clean, { 0,1,0 }, VIS_SPHERE_R);
+
+
+    // 兜底：万一某次 clean 为空，至少不要崩
+    if (chest_clean.empty()) chest_clean = chest_raw;
+
     auto chest_hull = GetConvexHullPointsXZ(chest_clean);
     auto chest_ring = ResampleClosedRing(chest_hull, 240);
+    // 调试一下有没有生成ring
+    std::cout << "[chest] raw=" << chest_raw.size()
+        << " clean=" << chest_clean.size()
+        << " hull=" << chest_hull.size()
+        << " ring=" << chest_ring.size() << "\n";
+
+
+
     std::cout << "2)  胸围        : " << PerimeterClosed(chest_ring) * 100.0 << " cm" << std::endl;
+
 
     // 3) 腰围
     double waist_y = J[3].y();
     auto waist_raw = GetSlice(*mesh, waist_y, 0.02);
     auto waist_clean = GetTorsoSlice(waist_raw, 0.02, 10, 0.55);
-    if (!waist_clean.empty()) *all_visuals += *VisualizeSlicePoints(waist_clean, { 1,0,1 });
+    // 可视化：只画原始切片点云
+    auto waist_vis_raw = GetSlice(*mesh, waist_y, VIS_TOL_Y);
+    auto waist_vis_torso = GetTorsoSlice(waist_vis_raw, 0.02, 10, 0.55, false);
+    if (!waist_vis_torso.empty())
+        *all_visuals += *VisualizeSlicePoints(waist_vis_torso, { 1,0,1 }, VIS_SPHERE_R);
+
     auto waist_hull = GetConvexHullPointsXZ(waist_clean);
     auto waist_ring = ResampleClosedRing(waist_hull, 200);
     double waist_girth = PerimeterClosed(waist_ring);
@@ -405,8 +504,10 @@ void measure_14_items(std::shared_ptr<geometry::TriangleMesh>& mesh, const torch
 
     std::cout << "3)  腰围        : " << waist_girth * 100.0 << " cm" << std::endl;
 
+
     // 4) 臀围
     double hip_best = 0.0;
+    double hip_best_y = J[0].y();
     std::vector<Eigen::Vector3d> hip_clean_best;
     for (double y = J[0].y() - 0.12; y < J[0].y() + 0.04; y += 0.01) {
         auto raw = GetSlice(*mesh, y, 0.003);
@@ -417,16 +518,23 @@ void measure_14_items(std::shared_ptr<geometry::TriangleMesh>& mesh, const torch
         auto ring = ResampleClosedRing(hull, 240);
         double per = PerimeterClosed(ring);
         if (per > 0.60 && per < 1.30 && per > hip_best) {
-            hip_best = per; hip_clean_best = clean;
+            hip_best = per; hip_clean_best = clean; hip_best_y = y;
         }
     }
-    if (!hip_clean_best.empty()) *all_visuals += *VisualizeSlicePoints(hip_clean_best, { 1,0.5,0 });
+    {
+        auto hip_vis_raw = GetSlice(*mesh, hip_best_y, VIS_TOL_Y);
+        auto hip_vis_torso = GetTorsoSlice(hip_vis_raw, 0.02, 10, 0.65, false); // 只用于可视化
+        if (!hip_vis_torso.empty())
+            *all_visuals += *VisualizeSlicePoints(hip_vis_torso, { 1,0.5,0 }, VIS_SPHERE_R);
+
+    }
     std::cout << "4)  臀围        : " << hip_best * 100.0 << " cm" << std::endl;
 
     // 5) 大腿围
     int L_HIP = 1, R_HIP = 2, L_KNEE = 4;
     double thigh_y0 = 0.60 * J[L_HIP].y() + 0.40 * J[L_KNEE].y();
     double thigh_best = 0.0;
+    double thigh_best_y = thigh_y0;
     std::vector<Eigen::Vector3d> thigh_clean_best;
     for (double y = thigh_y0 + 0.04; y >= thigh_y0 - 0.06; y -= 0.01) {
         auto raw = GetSlice(*mesh, y, 0.02);
@@ -440,11 +548,71 @@ void measure_14_items(std::shared_ptr<geometry::TriangleMesh>& mesh, const torch
         auto ring = ResampleClosedRing(hull, 200);
         double per = PerimeterClosed(ring);
         if (per > 0.30 && per < 0.90 && per > thigh_best) {
-            thigh_best = per; thigh_clean_best = clean;
+            thigh_best = per; thigh_clean_best = clean; thigh_best_y = y;
         }
     }
-    if (!thigh_clean_best.empty()) *all_visuals += *VisualizeSlicePoints(thigh_clean_best, { 1,0,0 });
+    {
+        // 可视化：原始点云（左腿）-> DBSCAN -> 取最大簇（大腿）
+        const double VIS_THIGH_TOL = 0.01;   // 画图用切片厚度：越小越细（0.008~0.012）
+        const double EPS = 0.015;           // 跟你测量循环里一致
+        const int    MINP = 10;
+
+        auto thigh_vis_raw = GetSlice(*mesh, thigh_best_y, VIS_THIGH_TOL);
+
+        // 先取左侧（原始点云，不做其它过滤）
+        std::vector<Eigen::Vector3d> thigh_vis_left;
+        thigh_vis_left.reserve(thigh_vis_raw.size());
+        for (auto& p : thigh_vis_raw) {
+            if ((p - J[L_HIP]).norm() < (p - J[R_HIP]).norm() - 0.005)
+                thigh_vis_left.push_back(p);
+        }
+
+        // DBSCAN：取最大簇
+        std::vector<Eigen::Vector3d> thigh_vis_big;
+        if (!thigh_vis_left.empty()) {
+            auto pcd = std::make_shared<open3d::geometry::PointCloud>();
+            pcd->points_ = thigh_vis_left;
+
+            auto labels = pcd->ClusterDBSCAN(EPS, MINP, false);
+
+            std::map<int, int> cnt;
+            for (int lb : labels) if (lb != -1) cnt[lb]++;
+
+            int best_label = -1, best_sz = 0;
+            for (auto& kv : cnt) {
+                if (kv.second > best_sz) { best_sz = kv.second; best_label = kv.first; }
+            }
+
+            if (best_label != -1) {
+                thigh_vis_big.reserve(best_sz);
+                for (size_t i = 0; i < thigh_vis_left.size(); ++i) {
+                    if (labels[i] == best_label) thigh_vis_big.push_back(thigh_vis_left[i]);
+                }
+            }
+
+            std::cout << "[thigh_vis] left=" << thigh_vis_left.size()
+                << " clusters=" << cnt.size()
+                << " best=" << best_sz
+                << " (eps=" << EPS << ",minPts=" << MINP << ")\n";
+        }
+
+        // 画“最大簇”的原始点云（这就是你要的大腿部分）
+        if (!thigh_vis_big.empty())
+            *all_visuals += *VisualizeSlicePoints(thigh_vis_big, { 1,0,0 }, VIS_SPHERE_R);
+
+        // 画线：用最大簇的凸包 ring（只会在大腿处）
+        if (!thigh_vis_big.empty()) {
+            auto hull = GetConvexHullPointsXZ(thigh_vis_big);
+            auto ring = ResampleClosedRing(hull, 200);
+            if (ring.size() >= 3) {
+                for (auto& p : ring) p.y() = thigh_best_y;
+                *all_visuals += *VisualizePathTube(ring, { 1,0,0 }, 0.0010); // 想更细：0.0008
+            }
+        }
+    }
+
     std::cout << "5)  大腿围      : " << thigh_best * 100.0 << " cm" << std::endl;
+
 
     // 6) 肩宽
     double sh_dist = dist_v3(J[16], J[17]);
@@ -453,10 +621,10 @@ void measure_14_items(std::shared_ptr<geometry::TriangleMesh>& mesh, const torch
     // 7) 袖笼围
     {
         double x_cut = J[16].x() + 0.02;
-        auto arm_raw = GetSliceX(*mesh, x_cut, 0.03);
+        auto arm_raw = GetSliceX(*mesh, x_cut, VIS_TOL_X);
         std::vector<Eigen::Vector3d> arm_clean, points_mapped, ring;
         for (auto& p : arm_raw) if ((p - J[16]).norm() < 0.25) arm_clean.push_back(p);
-        if (!arm_clean.empty()) *all_visuals += *VisualizeSlicePoints(arm_clean, { 0,0,1 });
+        if (!arm_clean.empty()) *all_visuals += *VisualizeSlicePoints(arm_clean, { 0,0,1 }, VIS_SPHERE_R);
 
         for (auto& p : arm_clean) points_mapped.push_back({ p.y(), 0, p.z() });
         auto hull = GetConvexHullPointsXZ(points_mapped);
@@ -665,15 +833,51 @@ int main() {
         // 保存比较模型
         auto comparison_mesh = std::make_shared<geometry::TriangleMesh>();
         *comparison_mesh += *target_ptr;
-        *comparison_mesh += *smpl_mesh_ptr;
+        // 创建一个临时的 SMPL 副本，涂成红色
+        auto smpl_red = std::make_shared<geometry::TriangleMesh>(*smpl_mesh_ptr);
+        smpl_red->PaintUniformColor({ 1.0, 0.0, 0.0 }); // RGB: 1,0,0 = 红色
+        *comparison_mesh += *smpl_red;
+        //*comparison_mesh += *smpl_mesh_ptr;
         io::WriteTriangleMesh(OUTPUT_COMPARISON, *comparison_mesh);
 
         // 保存关节叠加模型
-        auto joints_mesh_ptr = create_joints_visual(final_joints, Eigen::Vector3d(0.0, 1.0, 0.0));
+        auto joints_mesh_ptr = create_joints_visual(final_joints, 0.018);
+       
+        auto scan_grey = std::make_shared<geometry::TriangleMesh>(*target_ptr);
+        scan_grey->PaintUniformColor({ 0.65, 0.65, 0.65 });
+        scan_grey->ComputeTriangleNormals();
+        scan_grey->ComputeVertexNormals();
+
         auto joints_check_mesh = std::make_shared<geometry::TriangleMesh>();
-        *joints_check_mesh += *target_ptr;
+        *joints_check_mesh += *scan_grey;
         *joints_check_mesh += *joints_mesh_ptr;
+
+        joints_check_mesh->ComputeTriangleNormals();
+        joints_check_mesh->ComputeVertexNormals();
         io::WriteTriangleMesh(OUTPUT_JOINTS_ONLY, *joints_check_mesh);
+
+
+        // 3. 导出 smpl_with_joints (只展示 SMPL + 彩色关节球)
+        {
+            // 关键：给 SMPL 本体也写入 vertex_colors_，否则合并可能丢球的颜色
+            auto smpl_body = std::make_shared<geometry::TriangleMesh>(*smpl_mesh_ptr);
+            smpl_body->PaintUniformColor({ 0.75, 0.75, 0.75 }); // 灰色（随便）
+            smpl_body->ComputeTriangleNormals();
+            smpl_body->ComputeVertexNormals();
+
+            // joints_mesh_ptr 本身已经是 24 色（create_joints_visual 里 PaintUniformColor(JOINT_COLORS[i])）
+            auto smpl_with_joints = std::make_shared<geometry::TriangleMesh>();
+            *smpl_with_joints += *smpl_body;
+            *smpl_with_joints += *joints_mesh_ptr;
+
+            smpl_with_joints->ComputeTriangleNormals();
+            smpl_with_joints->ComputeVertexNormals();
+
+            std::string OUTPUT_SMPL_JOINTS = OUTPUT_DIR + "smpl_fit_with_joints.glb";
+            io::WriteTriangleMesh(OUTPUT_SMPL_JOINTS, *smpl_with_joints);
+            std::cout << ">>> 已保存: " << OUTPUT_SMPL_JOINTS << " (SMPL + 彩色关节)" << std::endl;
+        }
+
 
         // 6. [核心] 切换到原始模型进行测量
         //    (务必使用原始扫描，否则切手臂逻辑效果大打折扣)

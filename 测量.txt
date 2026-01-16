@@ -87,29 +87,30 @@ input1============ [ 14项专业身体测量报告 (精修版) ]
 
 如果您看到橙色的线形状很奇怪（比如变成了一个大三角形连到了手上），那就是因为“粘连”导致算臀围时把手也算进去了。
 
-0.pelvis（骨盆/根）
-1.left_hip（左髋）
-2.right_hip（右髋）
-3.spine1（脊柱1/下脊柱）
-4.left_knee（左膝）
-5.right_knee（右膝）
-6.spine2（脊柱2/中脊柱）
-7.left_ankle（左踝）
-8.right_ankle（右踝）
-9.spine3（脊柱3/上脊柱）
-10.left_foot（左脚）
-11.right_foot（右脚）
-12.neck（颈）
-13.left_collar（左锁骨）
-14.right_collar（右锁骨）
-15.head（头）
-16.left_shoulder（左肩）
-17.right_shoulder（右肩）
-18.left_elbow（左肘）
-19.right_elbow（右肘）
-20.left_wrist（左腕）
-21.right_wrist（右腕）
-22.left_hand（左手）
-23.right_hand（右手）
+0.pelvis（骨盆/根）红色 (1,0,0)
+1.left_hip（左髋）绿色 (0,1,0)
+2.right_hip（右髋）蓝色 (0,0,1)
+3.spine1（脊柱1/下脊柱）黄色 (1,1,0)
+4.left_knee（左膝）紫色 / 品红 (1,0,1)
+5.right_knee（右膝）青色 / 青蓝 (0,1,1)
+6.spine2（脊柱2/中脊柱）橙色 (1,0.5,0)
+7.left_ankle（左踝）紫色偏蓝 (0.5,0,1)
+8.right_ankle（右踝）天蓝 (0,0.5,1)
+9.spine3（脊柱3/上脊柱）翠绿 (0,0.8,0.2)
+10.left_foot（左脚）砖红 / 橙红 (0.8,0.2,0)
+11.right_foot（右脚）深灰 (0.2,0.2,0.2)
+12.neck（颈）黄绿 / 橄榄黄 (0.6,0.6,0)
+13.left_collar（左锁骨）紫色 (0.6,0,0.6)
+14.right_collar（右锁骨）青绿 / 蓝绿 (0,0.6,0.6)
+15.head（头）粉红 (0.9,0.3,0.4)
+16.left_shoulder（左肩）浅绿 (0.4,0.9,0.3)
+17.right_shoulder（右肩）浅蓝 (0.3,0.4,0.9)
+18.left_elbow（左肘）金黄 / 土黄 (0.9,0.7,0.2)
+19.right_elbow（右肘）薄荷绿 / 青绿 (0.2,0.9,0.7)
+20.left_wrist（左腕）紫粉 (0.7,0.2,0.9)
+21.right_wrist（右腕）玫红 / 紫红 (0.9,0.2,0.7)
+22.left_hand（左手）青蓝（偏蓝） (0.2,0.7,0.9)
+23.right_hand（右手）黄绿 (0.7,0.9,0.2)
+
 
 
